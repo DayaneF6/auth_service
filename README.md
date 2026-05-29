@@ -2,7 +2,7 @@
 
 API de autenticação em Go para portfólio — registro, login, JWT, refresh em cookie HttpOnly, RBAC e auditoria.
 
-**Stack:** Go 1.23 · chi · PostgreSQL · Redis · JWT · bcrypt · Prometheus
+**Stack:** Go 1.25 · chi · PostgreSQL · Redis · JWT · bcrypt · Prometheus
 
 ---
 
