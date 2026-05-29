@@ -1,0 +1,40 @@
+app:
+  name: auth-service
+  environment: development
+  version: 0.1.0
+
+http:
+  host: 0.0.0.0
+  port: 8080
+  read_timeout: 15s
+  write_timeout: 15s
+  idle_timeout: 60s
+  shutdown_timeout: 10s
+  allowed_origins:
+    - http://localhost:3000
+  max_header_bytes: 1048576
+
+postgres:
+  host: localhost
+  port: 5432
+  user: auth
+  database: auth
+  sslmode: disable
+
+redis:
+  addr: localhost:6379
+
+security:
+  rate_limit_rpm: 120
+  login_rate_limit_rpm: 10
+  register_rate_limit_rpm: 30
+  refresh_rate_limit_rpm: 20
+  sensitive_rate_limit_rpm: 5
+  login_max_attempts: 5
+  login_lockout_duration: 15m
+
+telemetry:
+  log_level: info
+  metrics_enabled: true
+  tracing_enabled: false
+  otlp_insecure: true

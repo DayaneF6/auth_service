@@ -1,0 +1,269 @@
+openapi: 3.0.3
+info:
+  title: Auth Service API
+  version: 1.0.0
+servers:
+  - url: http://localhost:8080/api/v1
+paths:
+  /auth/register:
+    post:
+      summary: Register user
+      description: Creates a user and returns a verification token in development. Supports Idempotency-Key.
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: false
+          schema: { type: string, minLength: 8, maxLength: 128 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+  /auth/login:
+    post:
+      summary: Login
+      description: Returns access token and sets refresh token as HttpOnly cookie.
+      responses:
+        "200":
+          description: Access token issued
+          headers:
+            Set-Cookie:
+              description: Refresh token cookie
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessTokenResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+  /auth/refresh:
+    post:
+      summary: Refresh access token
+      description: Rotates refresh token using HttpOnly cookie and returns a new access token.
+      responses:
+        "200":
+          description: Access token refreshed
+          headers:
+            Set-Cookie:
+              description: Rotated refresh token cookie
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessTokenResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+  /auth/logout:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Logout session
+      description: Blacklists access token jti, revokes refresh token (cookie) and clears session.
+      responses:
+        "200":
+          description: Logged out
+          headers:
+            Set-Cookie:
+              description: Refresh cookie cleared
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+  /auth/logout-all:
+    post:
+      security: [{ bearerAuth: [] }]
+      summary: Logout all sessions
+      responses:
+        "200":
+          description: Sessions revoked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+  /auth/forgot-password:
+    post:
+      summary: Forgot password
+      responses:
+        "200":
+          description: Always returns ok message
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForgotPasswordResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForgotPasswordRequest"
+  /auth/reset-password:
+    post:
+      summary: Reset password
+      responses:
+        "200":
+          description: Password updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResetPasswordRequest"
+  /auth/verify-email:
+    post:
+      summary: Verify email
+      responses:
+        "200":
+          description: Email verified
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+  /me:
+    get:
+      security: [{ bearerAuth: [] }]
+      summary: Current user profile
+      responses:
+        "200":
+          description: Profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+  /health:
+    get:
+      summary: Liveness
+      responses:
+        "200":
+          description: OK
+  /ready:
+    get:
+      summary: Readiness
+      responses:
+        "200":
+          description: OK
+        "503":
+          description: Degraded
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/APIError"
+  schemas:
+    APIError:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        details:
+          type: object
+          additionalProperties: true
+    MessageResponse:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+    RegisterRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8, maxLength: 72 }
+    RegisterResponse:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+        verification_token: { type: string, description: Dev-only token }
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+    AccessTokenResponse:
+      type: object
+      required: [access_token, expires_in, token_type]
+      properties:
+        access_token: { type: string }
+        expires_in: { type: integer, format: int64 }
+        token_type: { type: string, enum: [Bearer] }
+    ProfileResponse:
+      type: object
+      required: [UserID, Email, Roles, Permissions]
+      properties:
+        UserID: { type: string, format: uuid }
+        Email: { type: string, format: email }
+        Roles:
+          type: array
+          items: { type: string }
+        Permissions:
+          type: array
+          items: { type: string }
+    ForgotPasswordRequest:
+      type: object
+      required: [email]
+      properties:
+        email: { type: string, format: email }
+    ForgotPasswordResponse:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+        reset_token: { type: string, description: Dev-only token }
+    ResetPasswordRequest:
+      type: object
+      required: [token, new_password]
+      properties:
+        token: { type: string }
+        new_password: { type: string, minLength: 8, maxLength: 72 }
