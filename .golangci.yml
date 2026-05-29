@@ -1,17 +1,14 @@
+version: "2"
+
 run:
   timeout: 5m
 
 linters:
+  default: standard
   enable:
-    - errcheck
-    - govet
-    - staticcheck
-    - ineffassign
     - gosec
-    - unused
-
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - gosec
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec

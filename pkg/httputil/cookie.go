@@ -30,7 +30,8 @@ func refreshCookie(cfg config.JWTConfig, value string, maxAge int) *http.Cookie 
 	if path == "" {
 		path = "/"
 	}
-	return &http.Cookie{
+	// Secure and SameSite come from config (production uses Secure=true).
+	return &http.Cookie{ //nolint:gosec // G124 — HttpOnly always on; Secure is env-driven via JWTConfig
 		Name: cfg.RefreshCookieName, Value: value, Path: path,
 		Domain: cfg.RefreshCookieDomain, Secure: cfg.RefreshCookieSecure,
 		HttpOnly: true, SameSite: parseSameSite(cfg.RefreshCookieSameSite), MaxAge: maxAge,
