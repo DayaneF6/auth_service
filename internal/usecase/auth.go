@@ -3,9 +3,7 @@ package usecase
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/dayaneroot/auth-service/internal/config"
@@ -13,74 +11,93 @@ import (
 	jwtsvc "github.com/dayaneroot/auth-service/internal/infrastructure/jwt"
 	"github.com/dayaneroot/auth-service/pkg/password"
 	"github.com/dayaneroot/auth-service/pkg/token"
-	"github.com/dayaneroot/auth-service/pkg/validate"
 	"github.com/google/uuid"
 )
 
+const defaultRole = "user"
+
+// AuthService orchestrates auth flows; it never invokes a shell or interprets user input as commands.
 type AuthService struct {
-	cfg       *config.Config
-	jwt       *jwtsvc.Service
-	users     domain.UserRepository
-	refresh   domain.RefreshTokenRepository
-	resets    domain.OneTimeTokenRepository
-	verify    domain.OneTimeTokenRepository
-	audit     domain.AuditRepository
-	sessions  domain.SessionStore
-	blacklist domain.TokenBlacklist
-	lockout   domain.LoginLockout
+	cfg        *config.Config
+	jwt        *jwtsvc.Service
+	users      domain.UserRepository
+	refresh    domain.RefreshTokenRepository
+	resets     domain.OneTimeTokenRepository
+	verify     domain.OneTimeTokenRepository
+	audit      domain.AuditRepository
+	sessions   domain.SessionStore
+	blacklist  domain.TokenBlacklist
+	lockout    domain.LoginLockout
+	mailer     domain.Mailer
+	emailLimit domain.RateLimiter
 }
 
-type AuthDeps struct {
-	Config    *config.Config
-	JWT       *jwtsvc.Service
-	Users     domain.UserRepository
-	Refresh   domain.RefreshTokenRepository
-	Resets    domain.OneTimeTokenRepository
-	Verify    domain.OneTimeTokenRepository
-	Audit     domain.AuditRepository
-	Sessions  domain.SessionStore
-	Blacklist domain.TokenBlacklist
-	Lockout   domain.LoginLockout
+// Repos groups Postgres-backed repositories.
+type Repos struct {
+	Users   domain.UserRepository
+	Refresh domain.RefreshTokenRepository
+	Resets  domain.OneTimeTokenRepository
+	Verify  domain.OneTimeTokenRepository
+	Audit   domain.AuditRepository
 }
 
-func NewAuthService(d AuthDeps) *AuthService {
+// Infra groups Redis, email, and rate-limit adapters.
+type Infra struct {
+	Sessions   domain.SessionStore
+	Blacklist  domain.TokenBlacklist
+	Lockout    domain.LoginLockout
+	Mailer     domain.Mailer
+	EmailLimit domain.RateLimiter
+}
+
+func NewAuthService(cfg *config.Config, jwt *jwtsvc.Service, repos Repos, infra Infra) *AuthService {
 	return &AuthService{
-		cfg: d.Config, jwt: d.JWT,
-		users: d.Users, refresh: d.Refresh,
-		resets: d.Resets, verify: d.Verify,
-		audit: d.Audit, sessions: d.Sessions,
-		blacklist: d.Blacklist, lockout: d.Lockout,
+		cfg: cfg, jwt: jwt,
+		users: repos.Users, refresh: repos.Refresh,
+		resets: repos.Resets, verify: repos.Verify, audit: repos.Audit,
+		sessions: infra.Sessions, blacklist: infra.Blacklist, lockout: infra.Lockout,
+		mailer: infra.Mailer, emailLimit: infra.EmailLimit,
 	}
 }
 
+// Input DTOs carry validator tags (safe_text / safe_password / hex token format).
+
 type RegisterInput struct {
-	Email    string `validate:"required,email,max=255"`
-	Password string `validate:"required,min=8,max=72"`
+	Email    string `validate:"required,email,max=255,safe_text"`
+	Password string `validate:"required,min=8,max=72,safe_password"`
 }
 
 type LoginInput struct {
-	Email    string `validate:"required,email"`
-	Password string `validate:"required"`
+	Email    string `validate:"required,email,safe_text"`
+	Password string `validate:"required,max=72,safe_password"`
 }
 
 type ForgotPasswordInput struct {
-	Email string `validate:"required,email"`
+	Email string `validate:"required,email,safe_text"`
+}
+
+type TokenInput struct {
+	Token string `validate:"required,len=64,hexadecimal"`
 }
 
 type ResetPasswordInput struct {
-	Token       string `validate:"required"`
-	NewPassword string `validate:"required,min=8,max=72"`
+	TokenInput
+	NewPassword string `validate:"required,min=8,max=72,safe_password"`
 }
 
 func (s *AuthService) Register(ctx context.Context, in RegisterInput, ip, ua string) (string, error) {
-	if err := validate.Struct(in); err != nil {
-		return "", domain.ErrInvalidInput
+	if err := requireInput(in); err != nil {
+		return "", err
+	}
+	email := normEmail(in.Email)
+	if err := s.consumeEmailQuota(ctx, email); err != nil {
+		return "", err
 	}
 	hash, err := password.Hash(in.Password, s.cfg.Security.BcryptCost)
 	if err != nil {
 		return "", err
 	}
-	user, err := s.users.CreateWithRole(ctx, normEmail(in.Email), hash, "user")
+	user, err := s.users.CreateWithRole(ctx, email, hash, defaultRole)
 	if err != nil {
 		return "", err
 	}
@@ -88,13 +105,16 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput, ip, ua str
 	if err != nil {
 		return "", err
 	}
+	if err := s.sendActionEmail(ctx, email, verifyToken, mailVerify); err != nil {
+		return "", err
+	}
 	s.logAudit(ctx, &user.ID, "user.registered", ip, ua, nil)
-	return verifyToken, nil
+	return s.devToken(verifyToken), nil
 }
 
 func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (*domain.TokenPair, error) {
-	if err := validate.Struct(in); err != nil {
-		return nil, domain.ErrInvalidInput
+	if err := requireInput(in); err != nil {
+		return nil, err
 	}
 	email := normEmail(in.Email)
 	locked, err := s.lockout.IsLocked(ctx, email)
@@ -107,16 +127,12 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 	user, err := s.users.GetByEmail(ctx, email)
 	if err != nil {
 		if errors.Is(err, domain.ErrNotFound) {
-			_ = s.lockout.RecordFailure(ctx, email, s.cfg.Security.LoginMaxAttempts, s.cfg.Security.LoginLockoutDuration)
-			s.logAudit(ctx, nil, "auth.login_failed", ip, ua, nil)
-			return nil, domain.ErrUnauthorized
+			return s.failLogin(ctx, email, ip, ua)
 		}
 		return nil, err
 	}
 	if !user.IsActive || password.Compare(user.PasswordHash, in.Password) != nil {
-		_ = s.lockout.RecordFailure(ctx, email, s.cfg.Security.LoginMaxAttempts, s.cfg.Security.LoginLockoutDuration)
-		s.logAudit(ctx, nil, "auth.login_failed", ip, ua, nil)
-		return nil, domain.ErrUnauthorized
+		return s.failLogin(ctx, email, ip, ua)
 	}
 	_ = s.lockout.Clear(ctx, email)
 	pair, err := s.issueTokens(ctx, user.ID, uuid.New(), uuid.New())
@@ -150,6 +166,7 @@ func (s *AuthService) Refresh(ctx context.Context, refreshRaw, ip, ua string) (*
 	return pair, nil
 }
 
+// Logout blacklists the current access jti and revokes the refresh cookie token.
 func (s *AuthService) Logout(ctx context.Context, userID, sessionID uuid.UUID, accessJTI string, accessExp time.Time, refreshRaw, ip, ua string) error {
 	if ttl := time.Until(accessExp); accessJTI != "" && ttl > 0 {
 		_ = s.blacklist.Add(ctx, accessJTI, ttl)
@@ -162,32 +179,38 @@ func (s *AuthService) Logout(ctx context.Context, userID, sessionID uuid.UUID, a
 	return nil
 }
 
+// LogoutAll revokes every refresh token and Redis session for the user.
 func (s *AuthService) LogoutAll(ctx context.Context, userID uuid.UUID) error {
-	_ = s.refresh.RevokeAllForUser(ctx, userID)
-	_ = s.sessions.DeleteAllForUser(ctx, userID)
+	s.revokeAllSessions(ctx, userID)
 	s.logAudit(ctx, &userID, "auth.logout_all", "", "", nil)
 	return nil
 }
 
+// ForgotPassword always returns success; email is sent only when the account exists.
 func (s *AuthService) ForgotPassword(ctx context.Context, in ForgotPasswordInput) (string, error) {
-	if err := validate.Struct(in); err != nil {
-		return "", domain.ErrInvalidInput
+	if err := requireInput(in); err != nil {
+		return "", err
 	}
 	user, err := s.users.GetByEmail(ctx, normEmail(in.Email))
 	if err != nil {
-		return "", nil // same response whether the email exists or not
+		return "", nil
+	}
+	if err := s.consumeEmailQuota(ctx, user.Email); err != nil {
+		return "", nil
 	}
 	resetToken, err := s.issueOneTime(ctx, s.resets, user.ID, time.Hour)
 	if err != nil {
-		return "", err
+		return "", nil
 	}
+	_ = s.sendActionEmail(ctx, user.Email, resetToken, mailReset)
 	s.logAudit(ctx, &user.ID, "auth.password_reset_requested", "", "", nil)
-	return resetToken, nil
+	return s.devToken(resetToken), nil
 }
 
+// ResetPassword consumes a one-time token and invalidates all active sessions.
 func (s *AuthService) ResetPassword(ctx context.Context, in ResetPasswordInput) error {
-	if err := validate.Struct(in); err != nil {
-		return domain.ErrInvalidInput
+	if err := requireInput(in); err != nil {
+		return err
 	}
 	userID, err := s.resets.Consume(ctx, token.Hash(in.Token))
 	if err != nil {
@@ -200,17 +223,17 @@ func (s *AuthService) ResetPassword(ctx context.Context, in ResetPasswordInput) 
 	if err := s.users.UpdatePassword(ctx, *userID, hash); err != nil {
 		return err
 	}
-	_ = s.refresh.RevokeAllForUser(ctx, *userID)
-	_ = s.sessions.DeleteAllForUser(ctx, *userID)
+	s.revokeAllSessions(ctx, *userID)
 	s.logAudit(ctx, userID, "auth.password_reset", "", "", nil)
 	return nil
 }
 
-func (s *AuthService) VerifyEmail(ctx context.Context, raw string) error {
-	if raw == "" {
-		return domain.ErrInvalidInput
+// VerifyEmail marks the account verified after consuming the registration token.
+func (s *AuthService) VerifyEmail(ctx context.Context, in TokenInput) error {
+	if err := requireInput(in); err != nil {
+		return err
 	}
-	userID, err := s.verify.Consume(ctx, token.Hash(raw))
+	userID, err := s.verify.Consume(ctx, token.Hash(in.Token))
 	if err != nil {
 		return err
 	}
@@ -230,74 +253,9 @@ func (s *AuthService) ParseAccess(ctx context.Context, raw string) (*jwtsvc.Clai
 	if err != nil {
 		return nil, domain.ErrUnauthorized
 	}
-	blacklisted, err := s.blacklist.Exists(ctx, claims.ID)
-	if err != nil || blacklisted {
+	ok, err := s.blacklist.Exists(ctx, claims.ID)
+	if err != nil || ok {
 		return nil, domain.ErrUnauthorized
 	}
 	return claims, nil
-}
-
-func normEmail(email string) string {
-	return strings.ToLower(strings.TrimSpace(email))
-}
-
-func (s *AuthService) logAudit(ctx context.Context, userID *uuid.UUID, action, ip, ua string, meta map[string]string) {
-	var raw json.RawMessage
-	if meta != nil {
-		raw, _ = json.Marshal(meta)
-	}
-	_ = s.audit.Log(ctx, domain.AuditEntry{
-		UserID: userID, Action: action, IPAddress: ip, UserAgent: ua, Metadata: raw,
-	})
-}
-
-func (s *AuthService) issueOneTime(ctx context.Context, repo domain.OneTimeTokenRepository, userID uuid.UUID, ttl time.Duration) (string, error) {
-	raw, err := token.Random(32)
-	if err != nil {
-		return "", err
-	}
-	if err := repo.Create(ctx, userID, token.Hash(raw), time.Now().Add(ttl)); err != nil {
-		return "", err
-	}
-	return raw, nil
-}
-
-func (s *AuthService) issueTokens(ctx context.Context, userID, sessionID, familyID uuid.UUID) (*domain.TokenPair, error) {
-	profile, err := s.users.GetAuthProfile(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	ttl := s.jwt.RefreshTTL()
-	if err := s.sessions.Save(ctx, domain.Session{
-		ID: sessionID, UserID: userID, Email: profile.Email,
-		Roles: profile.Roles, Permissions: profile.Permissions, FamilyID: familyID,
-	}, ttl); err != nil {
-		return nil, err
-	}
-	role := "user"
-	if len(profile.Roles) > 0 {
-		role = profile.Roles[0]
-	}
-	access, exp, err := s.jwt.IssueAccess(jwtsvc.IssueInput{
-		UserID: userID, Email: profile.Email, Role: role,
-		Permissions: profile.Permissions, SessionID: sessionID,
-	})
-	if err != nil {
-		return nil, err
-	}
-	refreshRaw, err := token.Random(32)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.refresh.Save(ctx, domain.RefreshRecord{
-		UserID: userID, SessionID: sessionID,
-		TokenHash: token.Hash(refreshRaw), FamilyID: familyID,
-		ExpiresAt: time.Now().Add(ttl),
-	}); err != nil {
-		return nil, err
-	}
-	return &domain.TokenPair{
-		AccessToken: access, RefreshToken: refreshRaw,
-		ExpiresIn: int64(time.Until(exp).Seconds()),
-	}, nil
 }

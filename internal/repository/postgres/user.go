@@ -21,7 +21,7 @@ func (r *UserRepo) CreateWithRole(ctx context.Context, email, passwordHash, role
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after successful Commit
 
 	const insertUser = `
 		INSERT INTO users (email, password_hash)

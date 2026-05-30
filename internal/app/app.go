@@ -8,10 +8,12 @@ import (
 	"net/http"
 
 	"github.com/dayaneroot/auth-service/internal/config"
+	"github.com/dayaneroot/auth-service/internal/domain"
 	"github.com/dayaneroot/auth-service/internal/delivery/http/router"
 	jwtsvc "github.com/dayaneroot/auth-service/internal/infrastructure/jwt"
 	"github.com/dayaneroot/auth-service/internal/infrastructure/postgres"
 	redisinfra "github.com/dayaneroot/auth-service/internal/infrastructure/redis"
+	resendmail "github.com/dayaneroot/auth-service/internal/infrastructure/resend"
 	"github.com/dayaneroot/auth-service/internal/infrastructure/telemetry"
 	repo "github.com/dayaneroot/auth-service/internal/repository/postgres"
 	"github.com/dayaneroot/auth-service/internal/usecase"
@@ -49,16 +51,19 @@ func New(ctx context.Context, cfg *config.Config, log *zap.Logger) (*App, error)
 	}
 
 	jwt := jwtsvc.NewService(cfg.JWT)
-	auth := usecase.NewAuthService(usecase.AuthDeps{
-		Config: cfg, JWT: jwt,
-		Users:     repo.NewUserRepo(db),
-		Refresh:   repo.NewRefreshRepo(db),
-		Resets:    repo.NewPasswordResetRepo(db),
-		Verify:    repo.NewEmailVerificationRepo(db),
-		Audit:     repo.NewAuditRepo(db),
-		Sessions:  redisinfra.NewSessionStore(rdb),
-		Blacklist: redisinfra.NewBlacklist(rdb),
-		Lockout:   redisinfra.NewLockout(rdb),
+	limiter := redisinfra.NewRateLimiter(rdb)
+	var mailer domain.Mailer // nil when email disabled; usecase skips sends
+	if cfg.Email.Enabled {
+		mailer = resendmail.NewMailer(cfg.Email.APIKey, cfg.Email.From)
+		log.Info("transactional email enabled", zap.String("from", cfg.Email.From))
+	}
+	auth := usecase.NewAuthService(cfg, jwt, usecase.Repos{
+		Users: repo.NewUserRepo(db), Refresh: repo.NewRefreshRepo(db),
+		Resets: repo.NewPasswordResetRepo(db), Verify: repo.NewEmailVerificationRepo(db),
+		Audit: repo.NewAuditRepo(db),
+	}, usecase.Infra{
+		Sessions: redisinfra.NewSessionStore(rdb), Blacklist: redisinfra.NewBlacklist(rdb),
+		Lockout: redisinfra.NewLockout(rdb), Mailer: mailer, EmailLimit: limiter,
 	})
 
 	maxHeader := cfg.HTTP.MaxHeaderBytes
@@ -71,7 +76,7 @@ func New(ctx context.Context, cfg *config.Config, log *zap.Logger) (*App, error)
 		Handler: router.New(router.Deps{
 			Config: cfg, Logger: log, DB: db, Redis: rdb,
 			Auth:    auth,
-			Limiter: redisinfra.NewRateLimiter(rdb),
+			Limiter: limiter,
 			Idem:    redisinfra.NewIdempotency(rdb),
 		}),
 		ReadTimeout:       cfg.HTTP.ReadTimeout,

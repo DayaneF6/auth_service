@@ -36,7 +36,7 @@ docker compose up -d --build
 - Registro de usuário com role `user` e verificação de email
 - Login com **access token** (JSON) + **refresh token** (cookie HttpOnly)
 - Rotação de refresh, logout, revogação de sessões
-- Reset de senha e verificação de email (tokens de dev expostos só em `development`)
+- Reset de senha e verificação de email via **[Resend](https://resend.com)** (opcional) ou tokens na API em dev
 - Perfil autenticado (`/me`) com RBAC
 - Rate limit, lockout de login, blacklist de JWT e auditoria
 
@@ -73,7 +73,7 @@ sequenceDiagram
 cmd/api/              → main
 internal/
   delivery/http/      → router, handlers, middleware  (HTTP)
-  usecase/            → regras de negócio
+  usecase/            → auth.go (fluxos) + internal.go (tokens, email, audit)
   domain/             → entidades + interfaces (ports)
   repository/postgres → SQL
   infrastructure/     → redis, jwt, postgres pool
@@ -162,6 +162,7 @@ make test-e2e   # API rodando (usa porta do .env)
 | Replay | Reuso de refresh revogado → revoga família inteira |
 | Lockout | 5 falhas de login → bloqueio temporário (`account_locked`, 429) |
 | Rate limit | Por IP no Redis — global + por rota |
+| Injection | SQL parametrizado (pgx); links de e-mail via `url.Parse` (http/https); HTML escapado; tokens 64 hex; entradas com `safe_text` / `safe_password` (sem execução de shell — o serviço não chama `os/exec`) |
 
 **Limites padrão (req/min por IP):**
 
@@ -174,6 +175,32 @@ make test-e2e   # API rodando (usa porta do .env)
 | Forgot / reset / verify | `AUTH_SECURITY_SENSITIVE_RATE_LIMIT_RPM` | 5 |
 
 Erros padronizados: `{ "code", "message", "details?" }`. Em rate limit: HTTP 429 + `Retry-After`.
+
+---
+
+## E-mail (Resend)
+
+Com `AUTH_EMAIL_ENABLED=false` (padrão), os tokens de verificação/reset aparecem na resposta JSON para testes locais.
+
+Para enviar de verdade:
+
+1. Crie conta em [resend.com](https://resend.com) e gere uma API key.
+2. Verifique um domínio (ou use `onboarding@resend.dev` só para testes).
+3. No `.env`:
+
+```env
+AUTH_EMAIL_ENABLED=true
+AUTH_EMAIL_API_KEY=re_...
+AUTH_EMAIL_FROM="Auth <onboarding@resend.dev>"
+AUTH_EMAIL_VERIFY_LINK_BASE=http://localhost:3000/verify-email
+AUTH_EMAIL_RESET_LINK_BASE=http://localhost:3000/reset-password
+```
+
+O front deve ler `?token=` na URL e chamar `POST /api/v1/auth/verify-email` ou `reset-password`.
+
+**Limite anti-abuso:** até `AUTH_EMAIL_PER_RECIPIENT_LIMIT` (default 5) e-mails por destinatário a cada `AUTH_EMAIL_PER_RECIPIENT_WINDOW` (default 1h), via Redis. No registro, estouro retorna `429 rate_limited`; no forgot-password a API responde igual, sem enviar.
+
+Em produção com e-mail ativo, os tokens **não** vão mais no JSON da API.
 
 ---
 

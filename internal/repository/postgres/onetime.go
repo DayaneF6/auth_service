@@ -20,11 +20,21 @@ type OneTimeRepo struct {
 }
 
 func NewPasswordResetRepo(db *postgres.DB) *OneTimeRepo {
-	return &OneTimeRepo{db: db, table: "password_resets"}
+	return newOneTimeRepo(db, "password_resets")
 }
 
 func NewEmailVerificationRepo(db *postgres.DB) *OneTimeRepo {
-	return &OneTimeRepo{db: db, table: "email_verifications"}
+	return newOneTimeRepo(db, "email_verifications")
+}
+
+// newOneTimeRepo allowlists table names so dynamic SQL never uses user input.
+func newOneTimeRepo(db *postgres.DB, table string) *OneTimeRepo {
+	switch table {
+	case "password_resets", "email_verifications":
+		return &OneTimeRepo{db: db, table: table}
+	default:
+		panic("postgres: invalid onetime table: " + table)
+	}
 }
 
 func (r *OneTimeRepo) Create(ctx context.Context, userID uuid.UUID, tokenHash string, expiresAt time.Time) error {

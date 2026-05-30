@@ -55,3 +55,13 @@ type LoginLockout interface {
 type RateLimiter interface {
 	Allow(ctx context.Context, key string, limit int, window time.Duration) (bool, error)
 }
+
+// EmailMessage is a transactional email (verification or password reset).
+type EmailMessage struct {
+	To, Subject, Text, HTML string
+}
+
+// Mailer delivers outbound email (Resend when enabled).
+type Mailer interface {
+	Send(ctx context.Context, msg EmailMessage) error
+}

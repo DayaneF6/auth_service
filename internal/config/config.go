@@ -19,6 +19,7 @@ type Config struct {
 	Postgres  PostgresConfig  `mapstructure:"postgres"`
 	Redis     RedisConfig     `mapstructure:"redis"`
 	JWT       JWTConfig       `mapstructure:"jwt"`
+	Email     EmailConfig     `mapstructure:"email"`
 	Security  SecurityConfig  `mapstructure:"security"`
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
 }
@@ -100,6 +101,16 @@ type JWTConfig struct {
 	RefreshCookieSameSite string        `mapstructure:"refresh_cookie_samesite"`
 }
 
+type EmailConfig struct {
+	Enabled            bool          `mapstructure:"enabled"`
+	APIKey             string        `mapstructure:"api_key"`
+	From               string        `mapstructure:"from"`
+	VerifyLinkBase     string        `mapstructure:"verify_link_base"`
+	ResetLinkBase      string        `mapstructure:"reset_link_base"`
+	PerRecipientLimit  int           `mapstructure:"per_recipient_limit"`
+	PerRecipientWindow time.Duration `mapstructure:"per_recipient_window"`
+}
+
 type SecurityConfig struct {
 	BcryptCost             int           `mapstructure:"bcrypt_cost"`
 	RateLimitRPM             int           `mapstructure:"rate_limit_rpm"` // global ceiling per IP on /api/v1
@@ -123,6 +134,11 @@ func (c *Config) IsProduction() bool {
 	return strings.EqualFold(c.App.Environment, "production")
 }
 
+// ExposeDevTokens is true when one-time tokens may be returned in API JSON (local / email off).
+func (c *Config) ExposeDevTokens() bool {
+	return !c.Email.Enabled || !c.IsProduction()
+}
+
 // Load reads .env, config files, and AUTH_* environment variables.
 func Load() (*Config, error) {
 	_ = godotenv.Load()
@@ -141,7 +157,7 @@ func Load() (*Config, error) {
 	for key := range defaults {
 		_ = v.BindEnv(key)
 	}
-	for _, key := range []string{"jwt.access_secret", "jwt.refresh_secret"} {
+	for _, key := range []string{"jwt.access_secret", "jwt.refresh_secret", "email.api_key"} {
 		_ = v.BindEnv(key)
 	}
 
@@ -185,6 +201,29 @@ func (c *Config) Validate() error {
 	if c.Security.BcryptCost < 10 || c.Security.BcryptCost > 14 {
 		return fmt.Errorf("security.bcrypt_cost must be between 10 and 14")
 	}
+	if c.Email.Enabled {
+		if c.Email.APIKey == "" {
+			return fmt.Errorf("email.api_key is required when email.enabled is true")
+		}
+		if c.Email.From == "" {
+			return fmt.Errorf("email.from is required when email.enabled is true")
+		}
+		if c.Email.VerifyLinkBase == "" || c.Email.ResetLinkBase == "" {
+			return fmt.Errorf("email.verify_link_base and email.reset_link_base are required when email.enabled is true")
+		}
+		if err := requireHTTPSURL("email.verify_link_base", c.Email.VerifyLinkBase); err != nil {
+			return err
+		}
+		if err := requireHTTPSURL("email.reset_link_base", c.Email.ResetLinkBase); err != nil {
+			return err
+		}
+		if c.Email.PerRecipientLimit < 1 {
+			return fmt.Errorf("email.per_recipient_limit must be >= 1")
+		}
+		if c.Email.PerRecipientWindow < time.Minute {
+			return fmt.Errorf("email.per_recipient_window must be >= 1m")
+		}
+	}
 	for _, lim := range []struct {
 		name string
 		v    int
@@ -209,6 +248,17 @@ func requireMinLen(field, value string, min int) error {
 	return nil
 }
 
+func requireHTTPSURL(field, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("%s: invalid url", field)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("%s: scheme must be http or https", field)
+	}
+	return nil
+}
+
 func setDefaults(v *viper.Viper) map[string]any {
 	defaults := map[string]any{
 		"app.name": "auth-service", "app.environment": "development", "app.version": "0.1.0",
@@ -227,6 +277,10 @@ func setDefaults(v *viper.Viper) map[string]any {
 		"jwt.refresh_cookie_name": "refresh_token", "jwt.refresh_cookie_secure": false,
 		"jwt.refresh_cookie_domain": "", "jwt.refresh_cookie_path": "/",
 		"jwt.refresh_cookie_samesite": "Strict",
+		"email.enabled": false, "email.from": "",
+		"email.verify_link_base": "http://localhost:3000/verify-email",
+		"email.reset_link_base":  "http://localhost:3000/reset-password",
+		"email.per_recipient_limit": 5, "email.per_recipient_window": "1h",
 		"security.bcrypt_cost": 12,
 		"security.rate_limit_rpm": 120, "security.login_rate_limit_rpm": 10,
 		"security.register_rate_limit_rpm": 30, "security.refresh_rate_limit_rpm": 20,

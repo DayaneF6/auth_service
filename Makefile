@@ -1,4 +1,4 @@
-.PHONY: run build test test-race race lint docker-up docker-down migrate dev setup-db fix-docker-dns
+.PHONY: run build test test-race race lint docker-up docker-down migrate dev setup-db
 
 APP_NAME=auth-service
 MAIN_PATH=./cmd/api
@@ -49,6 +49,3 @@ setup-db:
 	bash scripts/setup-local-db.sh
 
 dev: migrate-up run
-
-fix-docker-dns:
-	bash scripts/fix-docker-dns.sh

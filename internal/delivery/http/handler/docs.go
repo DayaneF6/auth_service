@@ -1,9 +1,11 @@
+// Redoc UI for openapi.yaml (served at /docs).
 package handler
 
 import (
 	"net/http"
 )
 
+// DocsRedoc serves a minimal HTML page that loads the OpenAPI spec.
 func DocsRedoc(openapiPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

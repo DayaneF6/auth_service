@@ -2,7 +2,6 @@
 package handler
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -13,9 +12,9 @@ import (
 	"github.com/dayaneroot/auth-service/internal/middleware"
 	"github.com/dayaneroot/auth-service/internal/usecase"
 	"github.com/dayaneroot/auth-service/pkg/httputil"
-	"github.com/google/uuid"
 )
 
+// Auth maps HTTP routes to the auth use case (thin adapter, no business rules).
 type Auth struct {
 	svc  *usecase.AuthService
 	cfg  *config.Config
@@ -27,10 +26,7 @@ func NewAuth(cfg *config.Config, svc *usecase.AuthService, idem *redisinfra.Idem
 }
 
 func (h *Auth) Register(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
+	var body credentialsBody
 	raw, bodyHash, ok := httputil.ReadBodyHash(w, r)
 	if !ok {
 		return
@@ -39,24 +35,20 @@ func (h *Auth) Register(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteDecodeError(w)
 		return
 	}
-
+	ip, ua := peer(r)
 	run := func() ([]byte, error) {
-		token, err := h.svc.Register(r.Context(), usecase.RegisterInput{
+		tok, err := h.svc.Register(r.Context(), usecase.RegisterInput{
 			Email: body.Email, Password: body.Password,
-		}, httputil.ClientIP(r), r.UserAgent())
+		}, ip, ua)
 		if err != nil {
 			return nil, err
 		}
-		out, err := json.Marshal(httputil.WithDevToken(h.cfg.IsProduction(),
-			map[string]string{"message": "user created"}, "verification_token", token))
-		if err != nil {
-			return nil, err
-		}
-		return out, nil
+		return json.Marshal(httputil.MessageWithDevToken(h.cfg.ExposeDevTokens(),
+			"user created", "verification_token", tok))
 	}
-
-	if key := r.Header.Get("Idempotency-Key"); key != "" && h.idem != nil {
-		withIdempotency(w, r.Context(), h.idem, "register:"+key+":"+bodyHash, run)
+	key := httputil.SanitizeIdempotencyKey(r.Header.Get("Idempotency-Key"))
+	if key != "" && h.idem != nil {
+		httputil.RunIdempotent(w, r.Context(), h.idem, "register:"+key+":"+bodyHash, run)
 		return
 	}
 	resp, err := run()
@@ -68,16 +60,14 @@ func (h *Auth) Register(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Auth) Login(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
+	var body credentialsBody
 	if !httputil.Decode(w, r, &body) {
 		return
 	}
+	ip, ua := peer(r)
 	pair, err := h.svc.Login(r.Context(), usecase.LoginInput{
 		Email: body.Email, Password: body.Password,
-	}, httputil.ClientIP(r), r.UserAgent())
+	}, ip, ua)
 	if err != nil {
 		httputil.WriteError(w, err)
 		return
@@ -91,7 +81,8 @@ func (h *Auth) Refresh(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, domain.ErrUnauthorized)
 		return
 	}
-	pair, err := h.svc.Refresh(r.Context(), refresh, httputil.ClientIP(r), r.UserAgent())
+	ip, ua := peer(r)
+	pair, err := h.svc.Refresh(r.Context(), refresh, ip, ua)
 	if err != nil {
 		httputil.WriteError(w, err)
 		return
@@ -101,28 +92,24 @@ func (h *Auth) Refresh(w http.ResponseWriter, r *http.Request) {
 
 func (h *Auth) Logout(w http.ResponseWriter, r *http.Request) {
 	claims := middleware.ClaimsFrom(r.Context())
-	var accessExp time.Time
+	userID, sessionID, err := middleware.SessionIDs(r.Context())
+	if err != nil {
+		httputil.WriteError(w, err)
+		return
+	}
+	var exp time.Time
 	if claims.ExpiresAt != nil {
-		accessExp = claims.ExpiresAt.Time
+		exp = claims.ExpiresAt.Time
 	}
-	userID, err := userIDFromRequest(r)
-	if err != nil {
-		httputil.WriteError(w, err)
-		return
-	}
-	sessionID, err := sessionIDFromRequest(r)
-	if err != nil {
-		httputil.WriteError(w, err)
-		return
-	}
-	_ = h.svc.Logout(r.Context(), userID, sessionID, claims.ID, accessExp,
-		httputil.RefreshFromCookie(r, h.cfg.JWT), httputil.ClientIP(r), r.UserAgent())
+	ip, ua := peer(r)
+	_ = h.svc.Logout(r.Context(), userID, sessionID, claims.ID, exp,
+		httputil.RefreshFromCookie(r, h.cfg.JWT), ip, ua)
 	httputil.ClearRefreshCookie(w, h.cfg.JWT)
 	httputil.Message(w, http.StatusOK, "logged out")
 }
 
 func (h *Auth) LogoutAll(w http.ResponseWriter, r *http.Request) {
-	userID, err := userIDFromRequest(r)
+	userID, err := middleware.UserIDFromClaims(r.Context())
 	if err != nil {
 		httputil.WriteError(w, err)
 		return
@@ -135,19 +122,17 @@ func (h *Auth) LogoutAll(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Auth) ForgotPassword(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Email string `json:"email"`
-	}
+	var body struct{ Email string `json:"email"` }
 	if !httputil.Decode(w, r, &body) {
 		return
 	}
-	token, err := h.svc.ForgotPassword(r.Context(), usecase.ForgotPasswordInput{Email: body.Email})
+	tok, err := h.svc.ForgotPassword(r.Context(), usecase.ForgotPasswordInput{Email: body.Email})
 	if err != nil {
 		httputil.WriteError(w, err)
 		return
 	}
-	httputil.JSON(w, http.StatusOK, httputil.WithDevToken(h.cfg.IsProduction(),
-		map[string]string{"message": "if the email exists, a reset link was sent"}, "reset_token", token))
+	httputil.JSON(w, http.StatusOK, httputil.MessageWithDevToken(h.cfg.ExposeDevTokens(),
+		"if the email exists, a reset link was sent", "reset_token", tok))
 }
 
 func (h *Auth) ResetPassword(w http.ResponseWriter, r *http.Request) {
@@ -159,7 +144,7 @@ func (h *Auth) ResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.svc.ResetPassword(r.Context(), usecase.ResetPasswordInput{
-		Token: body.Token, NewPassword: body.NewPassword,
+		TokenInput: usecase.TokenInput{Token: body.Token}, NewPassword: body.NewPassword,
 	}); err != nil {
 		httputil.WriteError(w, err)
 		return
@@ -168,13 +153,11 @@ func (h *Auth) ResetPassword(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Auth) VerifyEmail(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Token string `json:"token"`
-	}
+	var body usecase.TokenInput
 	if !httputil.Decode(w, r, &body) {
 		return
 	}
-	if err := h.svc.VerifyEmail(r.Context(), body.Token); err != nil {
+	if err := h.svc.VerifyEmail(r.Context(), body); err != nil {
 		httputil.WriteError(w, err)
 		return
 	}
@@ -182,7 +165,7 @@ func (h *Auth) VerifyEmail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Auth) Me(w http.ResponseWriter, r *http.Request) {
-	userID, err := userIDFromRequest(r)
+	userID, err := middleware.UserIDFromClaims(r.Context())
 	if err != nil {
 		httputil.WriteError(w, err)
 		return
@@ -195,58 +178,16 @@ func (h *Auth) Me(w http.ResponseWriter, r *http.Request) {
 	httputil.JSON(w, http.StatusOK, profile)
 }
 
+type credentialsBody struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+func peer(r *http.Request) (ip, ua string) {
+	return httputil.ClientIP(r), r.UserAgent()
+}
+
 func (h *Auth) writeSession(w http.ResponseWriter, pair *domain.TokenPair) {
 	httputil.SetRefreshCookie(w, h.cfg.JWT, pair.RefreshToken)
 	httputil.WriteTokenPair(w, pair)
-}
-
-func userIDFromRequest(r *http.Request) (uuid.UUID, error) {
-	return parseClaimUUID(middleware.ClaimsFrom(r.Context()).UserID)
-}
-
-func sessionIDFromRequest(r *http.Request) (uuid.UUID, error) {
-	return parseClaimUUID(middleware.ClaimsFrom(r.Context()).SessionID)
-}
-
-func parseClaimUUID(raw string) (uuid.UUID, error) {
-	id, err := uuid.Parse(raw)
-	if err != nil {
-		return uuid.Nil, domain.ErrUnauthorized
-	}
-	return id, nil
-}
-
-const idemTTL = 5 * time.Minute
-
-func withIdempotency(w http.ResponseWriter, ctx context.Context, store *redisinfra.Idempotency, cacheKey string, fn func() ([]byte, error)) {
-	if replyCached(w, ctx, store, cacheKey) {
-		return
-	}
-	lockKey := cacheKey + ":lock"
-	acquired, _ := store.SetNX(ctx, lockKey, []byte("1"), idemTTL)
-	if !acquired {
-		if replyCached(w, ctx, store, cacheKey) {
-			return
-		}
-		httputil.WriteError(w, domain.ErrConflict)
-		return
-	}
-	body, err := fn()
-	if err != nil {
-		_ = store.Delete(ctx, lockKey)
-		httputil.WriteError(w, err)
-		return
-	}
-	_ = store.Set(ctx, cacheKey, body, idemTTL)
-	_ = store.Delete(ctx, lockKey)
-	httputil.WriteBytes(w, http.StatusCreated, body)
-}
-
-func replyCached(w http.ResponseWriter, ctx context.Context, store *redisinfra.Idempotency, key string) bool {
-	b, found, _ := store.Get(ctx, key)
-	if !found || len(b) == 0 || b[0] != '{' {
-		return false
-	}
-	httputil.WriteBytes(w, http.StatusCreated, b)
-	return true
 }

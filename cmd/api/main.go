@@ -1,3 +1,4 @@
+// Entry point: load config, start HTTP server, graceful shutdown on SIGINT/SIGTERM.
 package main
 
 import (

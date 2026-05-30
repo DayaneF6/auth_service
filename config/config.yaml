@@ -24,6 +24,13 @@ postgres:
 redis:
   addr: localhost:6379
 
+email:
+  enabled: false
+  verify_link_base: http://localhost:3000/verify-email
+  reset_link_base: http://localhost:3000/reset-password
+  per_recipient_limit: 5
+  per_recipient_window: 1h
+
 security:
   rate_limit_rpm: 120
   login_rate_limit_rpm: 10
