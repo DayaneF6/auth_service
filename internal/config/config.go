@@ -39,6 +39,8 @@ type HTTPConfig struct {
 	AllowedOrigins  []string      `mapstructure:"allowed_origins"`
 	MaxHeaderBytes  int           `mapstructure:"max_header_bytes"`
 	MetricsToken    string        `mapstructure:"metrics_token"`
+	// TrustProxy enables chi RealIP (X-Forwarded-For / X-Real-IP). Only set behind a trusted reverse proxy.
+	TrustProxy bool `mapstructure:"trust_proxy"`
 }
 
 func (h HTTPConfig) Addr() string {
@@ -86,6 +88,7 @@ type RedisConfig struct {
 
 type JWTConfig struct {
 	AccessSecret          string        `mapstructure:"access_secret"`
+	// RefreshSecret is unused (refresh tokens are opaque); kept for backward-compatible env files.
 	RefreshSecret         string        `mapstructure:"refresh_secret"`
 	AccessTTL             time.Duration `mapstructure:"access_ttl"`
 	RefreshTTL            time.Duration `mapstructure:"refresh_ttl"`
@@ -157,8 +160,18 @@ func (c *Config) Validate() error {
 	if err := requireMinLen("jwt.access_secret", c.JWT.AccessSecret, 32); err != nil {
 		return err
 	}
-	if err := requireMinLen("jwt.refresh_secret", c.JWT.RefreshSecret, 32); err != nil {
-		return err
+	if c.IsProduction() {
+		if !c.JWT.RefreshCookieSecure {
+			return fmt.Errorf("jwt.refresh_cookie_secure must be true in production")
+		}
+		if len(c.HTTP.AllowedOrigins) == 0 {
+			return fmt.Errorf("http.allowed_origins must be set in production")
+		}
+		for _, o := range c.HTTP.AllowedOrigins {
+			if o == "*" {
+				return fmt.Errorf("http.allowed_origins must not contain wildcard when credentials are allowed")
+			}
+		}
 	}
 	if c.Postgres.User == "" || c.Postgres.Database == "" {
 		return fmt.Errorf("postgres.user and postgres.database are required")
@@ -202,7 +215,7 @@ func setDefaults(v *viper.Viper) map[string]any {
 		"http.host": "0.0.0.0", "http.port": 8080,
 		"http.read_timeout": "15s", "http.write_timeout": "15s", "http.idle_timeout": "60s",
 		"http.shutdown_timeout": "10s", "http.allowed_origins": []string{"http://localhost:3000"},
-		"http.max_header_bytes": 1048576,
+		"http.max_header_bytes": 1048576, "http.trust_proxy": false,
 		"postgres.host":         "localhost", "postgres.port": 5432, "postgres.user": "auth",
 		"postgres.password": "auth", "postgres.database": "auth", "postgres.sslmode": "disable",
 		"postgres.max_open_conns": 25, "postgres.max_idle_conns": 10,

@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"crypto/subtle"
 	"net"
 	"net/http"
 	"strings"
@@ -13,7 +14,8 @@ func MetricsAuth(token string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if token != "" {
-				if bearerToken(r.Header.Get("Authorization")) == token {
+				got := bearerToken(r.Header.Get("Authorization"))
+				if subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1 {
 					next.ServeHTTP(w, r)
 					return
 				}

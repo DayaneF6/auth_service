@@ -181,10 +181,13 @@ Erros padronizados: `{ "code", "message", "details?" }`. Em rate limit: HTTP 429
 
 Todas as variáveis usam prefixo `AUTH_`. Copie [`.env.example`](.env.example).
 
-Obrigatório em produção:
-- JWT secrets com **≥ 32 caracteres**
+Obrigatório em produção (validado no boot):
+- `AUTH_JWT_ACCESS_SECRET` com **≥ 32 caracteres**
 - `AUTH_APP_ENVIRONMENT=production`
+- `AUTH_JWT_REFRESH_COOKIE_SECURE=true`
+- `AUTH_HTTP_ALLOWED_ORIGINS` explícito (sem `*` — cookies com credenciais)
 - Postgres com SSL (`AUTH_POSTGRES_SSLMODE` ≠ `disable`)
+- Atrás de proxy reverso: `AUTH_HTTP_TRUST_PROXY=true` (habilita RealIP; sem isso o IP vem só de `RemoteAddr`)
 
 ---
 

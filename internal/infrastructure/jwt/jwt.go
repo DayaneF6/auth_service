@@ -73,7 +73,7 @@ func (s *Service) ParseAccess(token string) (*Claims, error) {
 			return nil, fmt.Errorf("unexpected signing method")
 		}
 		return s.secret, nil
-	}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}))
+	}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}), jwt.WithIssuer(s.issuer))
 	if err != nil {
 		return nil, err
 	}

@@ -16,6 +16,7 @@ type Stack struct {
 	AllowedOrigins []string
 	Timeout        time.Duration
 	Production     bool
+	TrustProxy     bool
 }
 
 func (s Stack) Use(r chi.Router) {
@@ -23,7 +24,9 @@ func (s Stack) Use(r chi.Router) {
 	r.Use(TraceContext)
 	r.Use(SecurityHeaders(s.Production))
 	r.Use(Logging(s.Logger))
-	r.Use(chimw.RealIP)
+	if s.TrustProxy {
+		r.Use(chimw.RealIP)
+	}
 	r.Use(chimw.Timeout(s.Timeout))
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   s.AllowedOrigins,

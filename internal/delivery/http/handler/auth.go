@@ -47,8 +47,11 @@ func (h *Auth) Register(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		out, _ := json.Marshal(httputil.WithDevToken(h.cfg.IsProduction(),
+		out, err := json.Marshal(httputil.WithDevToken(h.cfg.IsProduction(),
 			map[string]string{"message": "user created"}, "verification_token", token))
+		if err != nil {
+			return nil, err
+		}
 		return out, nil
 	}
 
@@ -102,8 +105,16 @@ func (h *Auth) Logout(w http.ResponseWriter, r *http.Request) {
 	if claims.ExpiresAt != nil {
 		accessExp = claims.ExpiresAt.Time
 	}
-	userID, _ := uuid.Parse(claims.UserID)
-	sessionID, _ := uuid.Parse(claims.SessionID)
+	userID, err := userIDFromRequest(r)
+	if err != nil {
+		httputil.WriteError(w, err)
+		return
+	}
+	sessionID, err := sessionIDFromRequest(r)
+	if err != nil {
+		httputil.WriteError(w, err)
+		return
+	}
 	_ = h.svc.Logout(r.Context(), userID, sessionID, claims.ID, accessExp,
 		httputil.RefreshFromCookie(r, h.cfg.JWT), httputil.ClientIP(r), r.UserAgent())
 	httputil.ClearRefreshCookie(w, h.cfg.JWT)
@@ -190,7 +201,15 @@ func (h *Auth) writeSession(w http.ResponseWriter, pair *domain.TokenPair) {
 }
 
 func userIDFromRequest(r *http.Request) (uuid.UUID, error) {
-	id, err := uuid.Parse(middleware.ClaimsFrom(r.Context()).UserID)
+	return parseClaimUUID(middleware.ClaimsFrom(r.Context()).UserID)
+}
+
+func sessionIDFromRequest(r *http.Request) (uuid.UUID, error) {
+	return parseClaimUUID(middleware.ClaimsFrom(r.Context()).SessionID)
+}
+
+func parseClaimUUID(raw string) (uuid.UUID, error) {
+	id, err := uuid.Parse(raw)
 	if err != nil {
 		return uuid.Nil, domain.ErrUnauthorized
 	}

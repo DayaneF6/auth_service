@@ -9,11 +9,11 @@ import (
 )
 
 type UserRepository interface {
-	Create(ctx context.Context, email, passwordHash string) (*User, error)
+	// CreateWithRole inserts the user and role assignment in one transaction.
+	CreateWithRole(ctx context.Context, email, passwordHash, roleName string) (*User, error)
 	GetByEmail(ctx context.Context, email string) (*User, error)
 	UpdatePassword(ctx context.Context, userID uuid.UUID, passwordHash string) error
 	MarkEmailVerified(ctx context.Context, userID uuid.UUID) error
-	AssignRole(ctx context.Context, userID uuid.UUID, roleName string) error
 	GetAuthProfile(ctx context.Context, userID uuid.UUID) (*AuthProfile, error)
 }
 

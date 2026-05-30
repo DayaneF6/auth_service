@@ -4,6 +4,7 @@ package usecase
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
@@ -79,11 +80,8 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput, ip, ua str
 	if err != nil {
 		return "", err
 	}
-	user, err := s.users.Create(ctx, normEmail(in.Email), hash)
+	user, err := s.users.CreateWithRole(ctx, normEmail(in.Email), hash, "user")
 	if err != nil {
-		return "", err
-	}
-	if err := s.users.AssignRole(ctx, user.ID, "user"); err != nil {
 		return "", err
 	}
 	verifyToken, err := s.issueOneTime(ctx, s.verify, user.ID, 24*time.Hour)
@@ -99,11 +97,23 @@ func (s *AuthService) Login(ctx context.Context, in LoginInput, ip, ua string) (
 		return nil, domain.ErrInvalidInput
 	}
 	email := normEmail(in.Email)
-	if locked, _ := s.lockout.IsLocked(ctx, email); locked {
+	locked, err := s.lockout.IsLocked(ctx, email)
+	if err != nil {
+		return nil, err
+	}
+	if locked {
 		return nil, domain.ErrAccountLocked
 	}
 	user, err := s.users.GetByEmail(ctx, email)
-	if err != nil || !user.IsActive || password.Compare(user.PasswordHash, in.Password) != nil {
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			_ = s.lockout.RecordFailure(ctx, email, s.cfg.Security.LoginMaxAttempts, s.cfg.Security.LoginLockoutDuration)
+			s.logAudit(ctx, nil, "auth.login_failed", ip, ua, nil)
+			return nil, domain.ErrUnauthorized
+		}
+		return nil, err
+	}
+	if !user.IsActive || password.Compare(user.PasswordHash, in.Password) != nil {
 		_ = s.lockout.RecordFailure(ctx, email, s.cfg.Security.LoginMaxAttempts, s.cfg.Security.LoginLockoutDuration)
 		s.logAudit(ctx, nil, "auth.login_failed", ip, ua, nil)
 		return nil, domain.ErrUnauthorized

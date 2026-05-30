@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 
@@ -13,12 +14,13 @@ import (
 
 const MaxBody = 1 << 20
 
+// ClientIP returns the client address from RemoteAddr (set by chi RealIP only when trust_proxy is enabled).
 func ClientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return strings.TrimSpace(strings.Split(xff, ",")[0])
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		return strings.Trim(strings.TrimSpace(r.RemoteAddr), "[]")
 	}
-	host, _, _ := strings.Cut(r.RemoteAddr, ":")
-	return host
+	return strings.Trim(host, "[]")
 }
 
 func JSON(w http.ResponseWriter, status int, payload any) {
@@ -42,6 +44,10 @@ func Decode(w http.ResponseWriter, r *http.Request, dst any) bool {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
+		WriteDecodeError(w)
+		return false
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		WriteDecodeError(w)
 		return false
 	}

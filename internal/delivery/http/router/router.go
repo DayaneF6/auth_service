@@ -35,6 +35,7 @@ func New(deps Deps) http.Handler {
 		AllowedOrigins: deps.Config.HTTP.AllowedOrigins,
 		Timeout:        deps.Config.HTTP.ReadTimeout,
 		Production:     deps.Config.IsProduction(),
+		TrustProxy:     deps.Config.HTTP.TrustProxy,
 	}.Use(r)
 
 	health := handler.NewHealth(deps.Config.App.Name, deps.DB, deps.Redis)
